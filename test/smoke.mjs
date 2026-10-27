@@ -6,6 +6,9 @@ let prevented = 0;
 const rect = { top: 100, left: 200, width: 60, height: 16 };
 const timers = [];
 const pluginErrors = [];
+const pluginWarns = [];
+const pluginInfos = [];
+const timeline = [];
 const drainTimers = () => {
 	let guard = 0;
 	while (timers.length > 0 && guard < 200) {
@@ -77,6 +80,21 @@ function createElementStub(tag) {
 	return el;
 }
 
+function makeEl(spec = {}) {
+	const attributes = spec.attributes ?? {};
+	const el = {
+		nodeType: 1,
+		tagName: spec.tagName ?? "DIV",
+		isConnected: true,
+		parentElement: spec.parentElement ?? null,
+		getAttribute: (name) => (name in attributes ? attributes[name] : null),
+		querySelector: () => null,
+		querySelectorAll: () => [],
+		closest: (selector) => (spec.closest && selector in spec.closest ? spec.closest[selector] : null)
+	};
+	return el;
+}
+
 function makeNode(spec) {
 	return {
 		nodeType: 1,
@@ -107,7 +125,13 @@ globalThis.window = {
 	removeEventListener: () => {},
 	innerWidth: 1200,
 	innerHeight: 800,
-	console: { error: (message) => { pluginErrors.push(String(message)); }, warn: () => {}, log: () => {} },
+	console: {
+		error: (message) => { pluginErrors.push(String(message)); },
+		warn: (message) => { pluginWarns.push(String(message)); },
+		info: (message) => { pluginInfos.push(String(message)); },
+		log: () => {}
+	},
+	clearTimeout: () => {},
 	setTimeout: (fn) => {
 		timers.push(fn);
 		return timers.length;
@@ -147,7 +171,12 @@ const reactStub = {
 		}];
 	},
 	useEffect: (fn) => fn(),
-	useRef: () => ({ current: null })
+	useRef: () => {
+		const index = componentState.cursor;
+		componentState.cursor += 1;
+		if (componentState.cells.length <= index) componentState.cells[index] = { current: null };
+		return componentState.cells[index];
+	}
 };
 
 await import("../lib/client.js");
@@ -189,6 +218,7 @@ let seedCursor = 0;
 const seedPlan = ["blocked", "blocked", "applied"];
 const services = {
 	workspaces: { list: { getSnapshot: () => ({ items: [{ workspaceId: "ws-1", sessionIds: ["s1"] }] }) } },
+	sessionCatalog: null,
 	uiSession: { current: { getSnapshot: () => ({ key: "s1" }) } },
 	uiWorkspace: {
 		connectBlank: (workspaceId) => { calls.connectBlank.push([workspaceId]); return Promise.resolve("s-new"); },
@@ -196,6 +226,7 @@ const services = {
 	},
 	sessions: {
 		create: (options) => { calls.create.push([options]); return Promise.resolve("s-created"); },
+		list: { getSnapshot: () => ({ byId: { s1: { id: "s1", displayTitle: "引用功能调试" } } }) },
 		binding: (sessionId) => (bindingReady ? { sessionId } : void 0),
 		retain: (sessionId, options) => {
 			calls.retain.push([sessionId, options]);
@@ -205,6 +236,7 @@ const services = {
 	conversation: {
 		input: {
 			requestDraftInitialization: (binding, options) => {
+				timeline.push("seed");
 				calls.seed.push([binding, options]);
 				const outcome = seedPlan[Math.min(seedCursor, seedPlan.length - 1)];
 				seedCursor += 1;
@@ -215,7 +247,10 @@ const services = {
 	resources: { register: (provider) => { calls.resourceRegister.push(provider); return () => {}; } },
 	sidebarRight: {
 		openTabIn: (sessionId, kind, options) => calls.openTabIn.push([sessionId, kind, options]),
-		openResourceIn: (sessionId, address, options) => calls.openResourceIn.push([sessionId, address, options])
+		openResourceIn: (sessionId, address, options) => {
+			timeline.push("bind:" + address);
+			calls.openResourceIn.push([sessionId, address, options]);
+		}
 	},
 	layout: { openRightbar: () => { calls.openRightbar += 1; } }
 };
@@ -248,11 +283,13 @@ const dict = {
 	"tab.embedUnavailable": "这个版本不支持在侧栏内嵌会话，请在主区打开。",
 	"source.file": "— 来源：{path}:{line}",
 	"source.fileNoLine": "— 来源：{path}",
-	"source.page": "— 来源：{place}",
-	"region.conversation": "会话消息区",
-	"region.preview": "右侧文档预览",
-	"region.review": "交付物 · 变更审查",
-	"region.page": "页面 · {tag}"
+	"source.detail": "— 来源：{detail}",
+	"source.sessionTitle": "会话《{title}》",
+	"source.sessionMessage": "第 {n} 条消息",
+	"source.roleUser": "（你）",
+	"source.roleAssistant": "（助手）",
+	"source.codeBlock": "代码块 {lang}",
+	"source.composer": "— 来源：输入框草稿"
 };
 const translate = (key, params) => {
 	const template = dict[key] ?? key;
@@ -350,7 +387,8 @@ const renderButton = () => composerSlot.component({
 	useSession: (selector) => selector({ cwd: "D:\\BBG\\deepseek" }),
 	t: translate
 });
-renderButton();
+assert(renderButton() === null, "the composer mount renders nothing (no DOM node)");
+assert(registrations.slots.some((entry) => entry.definition.name === "conversation.input.right" && entry.definition.id === "selask.composer"), "the mount-only cell stays registered");
 
 const renderTab = (props) => {
 	componentState.cursor = 0;
@@ -388,6 +426,74 @@ assert(calls.setDraft[0].includes("— 来源：src/app/main.ts:41"), "structure
 assert(calls.submit === 0, "never calls submit");
 assert(menuEl.style.display === "none", "menu closed after picking");
 
+// ---- 2b) source line: detailed, or absent ----
+// writeBlock always appends one trailing newline; ignore that empty tail
+const lastLines = () => {
+	const lines = calls.setDraft[calls.setDraft.length - 1].split("\n");
+	if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+	return lines;
+};
+const draftSourceLine = () => {
+	const lines = lastLines();
+	const tail = lines[lines.length - 1];
+	return tail.startsWith("— 来源：") ? tail : null;
+};
+
+
+// (1) workspace file + line, from a deliverable review card
+selectionText.value = "const k = 3;";
+const menuFile = renderMenu(makeNode({
+	closest: {
+		"[data-review-file]": { getAttribute: () => "src\\app\\main.ts" },
+		"[data-diff-line]": { querySelectorAll: () => [{ textContent: "88" }] }
+	}
+}));
+click(menuFile.children[0]);
+report("source (file:line)", JSON.stringify(draftSourceLine()));
+assert(draftSourceLine() === "— 来源：src/app/main.ts:88", "file+line source kept");
+
+// (2) conversation body: session title + flow ordinal + role, no filler
+const flowEl = makeEl({ tagName: "DIV" });
+const nodeEl = makeEl({ attributes: { "data-chat-node-key": "k2", "data-chat-flow-kind": "assistant" } });
+const sessionEl = makeEl({ attributes: { "data-conversation-session": "s1" } });
+const secondNode = makeEl({ attributes: { "data-chat-node-key": "k1", "data-chat-flow-kind": "user" } });
+flowEl.querySelectorAll = () => [secondNode, nodeEl];
+nodeEl.closest = (selector) => (selector === "[data-chat-flow]" ? flowEl : null);
+const bodyNode = makeEl({
+	tagName: "P",
+	closest: {
+		"[data-chat-node-key]": nodeEl,
+		"[data-conversation-session]": sessionEl
+	}
+});
+selectionText.value = "这里说的引用落点是什么意思？";
+const menuBody = renderMenu(bodyNode);
+click(menuBody.children[0]);
+report("source (conversation)", JSON.stringify(draftSourceLine()));
+assert(draftSourceLine() === "— 来源：会话《引用功能调试》 · 第 2 条消息（助手）", "conversation source names the title, the ordinal and the role");
+assert(!draftSourceLine().includes("会话消息区") && !draftSourceLine().includes("页面 · "), "no filler phrasing in the conversation source");
+
+// (3) composer selection — the context menu skips the composer on purpose, so this
+// case is reached through the keyboard entry
+const composerNode = makeEl({ tagName: "DIV", closest: { "[data-composer-input]": makeEl() } });
+selectionText.value = "草稿里的一段";
+selectionNode = composerNode;
+shortcut.resolve({}).run();
+report("source (composer)", JSON.stringify(draftSourceLine()));
+assert(draftSourceLine() === "— 来源：输入框草稿", "composer source");
+
+// (4) no provable anchor: the source line must not exist at all
+const bareNode = makeEl({ tagName: "DIV" });
+selectionText.value = "一段没有锚点的文字";
+const menuBare = renderMenu(bareNode);
+click(menuBare.children[0]);
+report("draft without source", JSON.stringify(calls.setDraft[calls.setDraft.length - 1]));
+assert(draftSourceLine() === null, "no source line when nothing is provable");
+// the draft is append-only, so check just the segment this write appended
+const appended = calls.setDraft[calls.setDraft.length - 1].split("\n\n").pop();
+report("appended segment", JSON.stringify(appended));
+assert(appended === "> 一段没有锚点的文字\n", "the block keeps only the quote lines");
+
 // ---- 3) Ask in side chat: the tab opens, no session is created yet ----
 selectionText.value = "const y = 2;";
 const menu2 = renderMenu(makeNode({ closest: { "[data-chat-flow]": {} } }));
@@ -396,53 +502,107 @@ report("openTabIn after item 2", JSON.stringify(calls.openTabIn));
 assert(calls.openTabIn.length === 1 && calls.openTabIn[0][1] === "selask-quote", "side chat tab requested by kind");
 assert(calls.connectBlank.length === 0, "no session is created until the user submits");
 
-// ---- 4) compose tab: create (without replacing main) + retry the draft seed ----
-const composeTree = renderTab({ useTabInfo: () => ({ tab: { contentId: void 0 } }), useResource: () => ({ value: void 0 }) });
-report("compose children", composeTree.children.length);
-const textarea = composeTree.children[3];
-report("question value", JSON.stringify(textarea.props.value));
-assert(textarea.type === "textarea", "question box present");
-assert(textarea.props.value.endsWith("\n\n"), "prefilled with the quote block plus one blank line");
-textarea.props.onClick;
-composeTree.children[4].children[0].props.onClick();
-await flush();
-report("connectBlank", JSON.stringify(calls.connectBlank));
-report("openSession calls", JSON.stringify(calls.openSession));
-assert(calls.connectBlank.length === 1 && calls.connectBlank[0][0] === "ws-1", "session created through connectBlank(workspaceId)");
-assert(calls.openSession.length === 0, "main area is never switched");
-report("seed wait", "timers=" + timers.length + " seedCalls=" + calls.seed.length);
-assert(timers.length >= 1, "a retry is scheduled while the session binding is not ready yet");
-assert(calls.seed.length === 0, "no draft call happens before the binding exists");
-bindingReady = true;
-drainTimers();
-await flush();
-report("seed attempts", calls.seed.length);
-report("seed plan", JSON.stringify(calls.seed.map((entry) => entry[1].prompt.slice(0, 18))));
-assert(calls.seed.length >= 3, "blocked results are retried until applied");
-assert(calls.seed.every((entry) => typeof entry[0]?.sessionId === "string"), "seeding uses the session binding, not a promise");
-const seededTree = renderTab({ useTabInfo: () => ({ tab: { contentId: void 0 } }), useResource: () => ({ value: void 0 }) });
-const statusNode = seededTree.children[seededTree.children.length - 1];
-report("status text", JSON.stringify(statusNode?.children?.[0]?.children?.[0] ?? null));
-assert(statusNode !== undefined && statusNode !== null, "status line rendered");
-assert(String(statusNode.children[0].children[0]).includes("已在新会话里准备好引用"), "status reports the applied seed, not a blanket success");
-report("openResourceIn", JSON.stringify(calls.openResourceIn));
-assert(calls.openResourceIn.length === 1 && calls.openResourceIn[0][1].startsWith("dsh-resource://selaskchat/session/"), "tab is pointed at the new session's resource address");
-assert(calls.openSession.length === 0, "still no main-area switch");
-
-// ---- 5) embedded conversation: SessionProvider around the host factory slot ----
+// ---- 4) ask: create (no main switch) -> bind the tab -> only then seed the draft ----
 const fakeReference = { sessionId: "s-new", release: () => {} };
 const fakeSessionProvider = function SessionProvider(props) { return props.children; };
-const embeddedTree = renderTab({
+const unboundTab = () => renderTab({ useTabInfo: () => ({ tab: { contentId: void 0 } }), useResource: () => ({ value: void 0 }) });
+const boundTab = () => renderTab({
 	useTabInfo: () => ({ tab: { contentId: "dsh-resource://selaskchat/session/s-new" } }),
 	useResource: () => ({ value: { reference: fakeReference } }),
 	SessionProvider: fakeSessionProvider,
 	renderSlot: (name) => { calls.renderSlot.push(name); return { type: "slot", name }; }
 });
-report("embed tree", embeddedTree.props["data-selask-embed"] + " / " + (embeddedTree.children[0].type === fakeSessionProvider));
-assert(embeddedTree.props["data-selask-embed"] === "session", "tab switches to the embedded session view");
-assert(embeddedTree.children[0].type === fakeSessionProvider, "SessionProvider wraps the embedded view");
-assert(embeddedTree.children[0].props.session === fakeReference, "SessionProvider receives the retained reference");
-assert(calls.renderSlot[0] === "selask.chat.conversation", "the embed child slot is rendered");
+const lastStatus = (tree) => tree.children[tree.children.length - 1];
+const statusText = (node) => {
+	const text = node?.children?.[0]?.children?.[0];
+	return typeof text === "string" ? text : null;
+};
+const submitRound = async (plan) => {
+	seedPlan.length = 0;
+	for (const outcome of plan) seedPlan.push(outcome);
+	seedCursor = 0;
+	timeline.length = 0;
+	timers.length = 0;
+	selectionText.value = "问题：" + plan.join("-");
+	click(renderMenu(makeNode({})).children[1]);
+	const compose = unboundTab();
+	compose.children[4].children[0].props.onClick();
+	await flush();
+	// the Host has created the Session by now, so its binding exists for the seed retry
+	bindingReady = true;
+	return compose;
+};
+
+// (4a) the compose panel still creates the session without touching the main area
+const composeTree = await submitRound(["blocked", "blocked", "applied"]);
+report("compose children", composeTree.children.length);
+const textarea = composeTree.children[3];
+report("question value", JSON.stringify(textarea.props.value));
+assert(textarea.type === "textarea", "question box present");
+assert(textarea.props.value.endsWith("\n\n"), "prefilled with the quote block plus one blank line");
+report("connectBlank", JSON.stringify(calls.connectBlank));
+report("openSession calls", JSON.stringify(calls.openSession));
+assert(calls.connectBlank.length === 1 && calls.connectBlank[0][0] === "ws-1", "session created through connectBlank(workspaceId)");
+assert(calls.openSession.length === 0, "main area is never switched on the happy path");
+report("openResourceIn", JSON.stringify(calls.openResourceIn));
+assert(calls.openResourceIn.length === 1 && calls.openResourceIn[0][1].startsWith("dsh-resource://selaskchat/session/"), "tab is pointed at the new session's resource address");
+report("timeline before bind", JSON.stringify(timeline));
+assert(calls.seed.length === 0, "no draft write happens before the embedded conversation is mounted");
+
+// (4b) mounting the embedded conversation is what triggers the seed; bind precedes seed
+const boundTree = boundTab();
+report("bound tree", boundTree.props["data-selask-embed"] + " / " + (boundTree.children.some((child) => child !== null && child !== void 0 && child.type === fakeSessionProvider)));
+assert(boundTree.props["data-selask-embed"] === "session", "tab switches to the embedded session view");
+const providerNode = boundTree.children.find((child) => child !== null && child !== void 0 && child.type === fakeSessionProvider);
+assert(providerNode !== undefined, "SessionProvider wraps the embedded view");
+assert(providerNode.props.session === fakeReference, "SessionProvider receives the retained reference");
+report("timeline after bind", JSON.stringify(timeline));
+assert(timeline.indexOf("bind:dsh-resource://selaskchat/session/s-new") === 0, "binding happens before any seed call");
+drainTimers();
+await flush();
+report("timeline", JSON.stringify(timeline));
+assert(timeline.filter((entry) => entry === "seed").length >= 3, "blocked results are retried until applied");
+assert(timeline.indexOf("bind:dsh-resource://selaskchat/session/s-new") < timeline.indexOf("seed"), "the tab binds first, the seed follows");
+const appliedStatus = lastStatus(unboundTab());
+report("status (applied)", JSON.stringify(statusText(appliedStatus)));
+assert(statusText(appliedStatus).includes("已在新会话里准备好引用"), "applied branch copy");
+assert(pluginInfos.length >= 1 && pluginInfos[0].includes("draft seeded into side session"), "applied seed logs an info line");
+assert(calls.openSession.length === 0, "still no main-area switch");
+
+// (4c) preserved branch: the session already had a draft, so we say so instead of claiming success
+await submitRound(["preserved"]);
+boundTab();
+drainTimers();
+await flush();
+const preservedStatus = lastStatus(unboundTab());
+report("status (preserved)", JSON.stringify(statusText(preservedStatus)));
+assert(statusText(preservedStatus) === "新会话里已经有别的草稿，引用没有覆盖它。", "preserved branch copy");
+assert(pluginWarns.some((message) => message.includes("preserved")), "preserved is logged as a warning");
+
+// (4d) blocked branch: stays blocked through the whole budget
+await submitRound(Array.from({ length: 20 }, () => "blocked"));
+boundTab();
+drainTimers();
+await flush();
+const blockedStatus = lastStatus(unboundTab());
+report("status (blocked)", JSON.stringify(statusText(blockedStatus)));
+assert(statusText(blockedStatus).includes("一直忙") && statusText(blockedStatus).includes("20"), "blocked branch copy carries the attempt count");
+
+// (4e) binding never arrives: degrade to the main area with a warning, never silently
+const openBefore = calls.openSession.length;
+const warnsBefore = pluginWarns.length;
+await submitRound(["blocked", "applied"]);
+unboundTab();
+drainTimers();
+await flush();
+const degradedStatus = lastStatus(unboundTab());
+report("status (degraded)", JSON.stringify(statusText(degradedStatus)));
+report("plugin warns (degraded)", JSON.stringify(pluginWarns.slice(warnsBefore)));
+assert(calls.openSession.length === openBefore + 1 && calls.openSession[0] === "s-new", "the fallback opens the session in the main area");
+assert(pluginWarns.slice(warnsBefore).some((message) => message.includes("did not bind")), "the fallback is logged, not silent");
+assert(statusText(degradedStatus) !== null, "the degraded click still reports a status");
+
+// ---- 5) embedded conversation component: host factory slot ----
 const factoryCalls = [];
 const embedTree = embedSlot.component({
 	t: translate,
@@ -457,6 +617,7 @@ assert(factoryCalls.length === 1 && factoryCalls[0][0] === "conversation.content
 assert(factoryCalls[0][1].variant === "embedded", "it uses the embedded variant");
 const noFactoryTree = embedSlot.component({ t: translate, sessionId: "s-new" });
 assert(noFactoryTree.props["data-dsh-selask"] === "embed-unavailable", "missing factory slot degrades to a message, not a crash");
+
 
 // ---- 6) resource provider retains and releases the session ----
 const provider = calls.resourceRegister[0];
@@ -476,14 +637,17 @@ assert(calls.release.length === 1 && calls.release[0] === "s-new", "reference re
 // ---- 7) the shortcut / composer button still write the draft ----
 selectionText.value = "字".repeat(500);
 selectionNode = makeNode({ closest: { "[data-textpreview-body]": {} } });
-renderButton().props.onClick();
+assert(renderButton() === null, "re-rendering the mount still produces no DOM");
+const writesBeforeClip = calls.setDraft.length;
+shortcut.resolve({}).run();
 const lastDraft = calls.setDraft[calls.setDraft.length - 1];
 const quoteLine = lastDraft.split("\n").filter((line) => line.startsWith("> "))[0];
 report("clip quote line chars", Array.from(quoteLine).length);
 assert(Array.from(quoteLine).length === 403, "400 char snapshot + '> ' + ellipsis");
-assert(lastDraft.includes("— 来源：右侧文档预览"), "document preview labelled when no path resolves");
-shortcut.resolve({}).run();
-assert(calls.setDraft.length === 3, "shortcut writes the draft too");
+const appendedClip = lastDraft.split("\n\n").pop();
+report("clip appended segment tail", JSON.stringify(appendedClip.slice(-24)));
+assert(!appendedClip.includes("— 来源："), "a preview selection without a resolvable path emits no source line at all");
+assert(calls.setDraft.length === writesBeforeClip + 1, "the shortcut adds exactly one draft write");
 assert(calls.submit === 0, "nothing sends through the composer action face");
 
 // ---- 8) one failing registration must not take the others down ----
@@ -503,7 +667,7 @@ assert(applyThrew === null, "apply() survives a failing registration");
 assert((docListeners.get("contextmenu") ?? []).length === menuListenersBefore + 1, "context menu still installed when the composer cell fails");
 assert(registrations.tabs.length === tabsBefore + 1, "tab type still registered when the composer cell fails");
 assert(registrations.shortcuts.length === shortcutsBefore + 1, "shortcut still registered when the composer cell fails");
-assert(pluginErrors.length === errorsBefore + 1 && pluginErrors[errorsBefore].includes("composer button"), "the failure is logged against its own item");
+assert(pluginErrors.length === errorsBefore + 1 && pluginErrors[errorsBefore].includes("composer mount"), "the failure is logged against its own item");
 const menuListenersBefore2 = (docListeners.get("contextmenu") ?? []).length;
 const tabsBefore2 = registrations.tabs.length;
 let hookThrew = null;

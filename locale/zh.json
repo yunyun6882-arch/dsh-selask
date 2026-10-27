@@ -23,14 +23,17 @@
   "tab.seedBlocked": "新会话草稿一直忙（已重试 {count} 次）；可以点下面按钮在主区打开后粘贴。",
   "tab.seedPreserved": "新会话里已经有别的草稿，引用没有覆盖它。",
   "tab.seedUnavailable": "拿不到输入框接口（重试 {count} 次）。",
+  "tab.seedUnbound": "右栏没能打开该会话（已在主区打开，草稿会写在那里）。",
+  "tab.degraded": "（退化路径：会话已在主区打开）",
   "tab.openInMain": "在主区打开该会话",
   "tab.embedUnavailable": "这个版本不支持在侧栏内嵌会话，请在主区打开。",
   "source.file": "— 来源：{path}:{line}",
   "source.fileNoLine": "— 来源：{path}",
-  "source.page": "— 来源：{place}",
-  "region.conversation": "会话消息区",
-  "region.preview": "右侧文档预览",
-  "region.review": "交付物 · 变更审查",
-  "region.composer": "输入框",
-  "region.page": "页面 · {tag}"
+  "source.detail": "— 来源：{detail}",
+  "source.sessionTitle": "会话《{title}》",
+  "source.sessionMessage": "第 {n} 条消息",
+  "source.roleUser": "（你）",
+  "source.roleAssistant": "（助手）",
+  "source.codeBlock": "代码块 {lang}",
+  "source.composer": "— 来源：输入框草稿"
 }

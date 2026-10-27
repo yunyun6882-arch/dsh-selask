@@ -23,14 +23,17 @@
   "tab.seedBlocked": "The new draft stayed busy through {count} attempts; open it below to paste.",
   "tab.seedPreserved": "The new conversation already had a draft, so the quote was not written.",
   "tab.seedUnavailable": "The composer API was not reachable ({count} attempts).",
+  "tab.seedUnbound": "The right panel did not open that conversation (opened in the main area instead).",
+  "tab.degraded": "(fallback: the conversation is open in the main area)",
   "tab.openInMain": "Open that conversation in the main area",
   "tab.embedUnavailable": "This build cannot embed a conversation; open it in the main area instead.",
   "source.file": "— Source: {path}:{line}",
   "source.fileNoLine": "— Source: {path}",
-  "source.page": "— Source: {place}",
-  "region.conversation": "conversation transcript",
-  "region.preview": "document preview",
-  "region.review": "deliverable review",
-  "region.composer": "composer",
-  "region.page": "page · {tag}"
+  "source.detail": "— Source: {detail}",
+  "source.sessionTitle": "Conversation “{title}”",
+  "source.sessionMessage": "message {n}",
+  "source.roleUser": " (you)",
+  "source.roleAssistant": " (assistant)",
+  "source.codeBlock": "code block {lang}",
+  "source.composer": "— Source: composer draft"
 }

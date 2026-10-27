@@ -17,14 +17,19 @@
 | --- | --- | --- |
 | **右键菜单（主入口）** | 选区上任意位置 | `contextmenu` 捕获阶段拦截；仅当 `window.getSelection()` 非空、锚点 `isConnected`、矩形非零、且不在插件自身 DOM / 输入框内时才 `preventDefault()` 并出菜单 |
 | 全局快捷键 | `Ctrl+Shift+K`（macOS `Cmd+Shift+K`） | 等同「添加到对话」；可在「设置 → 快捷键」改 |
-| 输入框工具条 ❝ | 输入框右侧 | 保留；它同时是插件拿到 `inputActions` 的挂载点（list 槽 `conversation.input.right`，注册项带 `id: "selask.composer"` / `order: 100`） |
+| 输入框右侧的挂载点 | 输入框工具条（`conversation.input.right`） | **不渲染任何 DOM**：只借这个 list 槽挂载组件以拿到 `inputActions` / 当前草稿（`id: "selask.composer"` / `order: 100`）。所以页面上看不到按钮 |
 
 菜单两项文案：`menu.addToConversation` = **添加到对话**、`menu.askInSideChat` = **在侧边聊天中提问**（写在 `locale/zh.json`、`locale/en.json` 与 `lib/client.js` 内联字典里）。
 关闭方式：点菜单外（`pointerdown` 捕获）/ Esc（`keydown` 捕获）/ 滚动或改窗口尺寸（`scroll`、`resize` 捕获）/ 选中任一项。菜单是纯 DOM（`data-dsh-selask="menu"`），不进 React 树。
 
 ### 1.2 引用块格式（与第二版相同）
 
-能解析出「工作区文件 + 行号」→ `> 原文快照` + `— 来源：src/app/main.ts:41`；解析不出 → `— 来源：会话消息区` 这类页面位置描述。快照上限 **400 字**（Unicode 码点，超出加 `…`），按行加 `> ` 前缀。
+按「能多具体就多具体」的要**一条**来源行；拿不到可证明的定位就**整行不输出**（只留 `> ` 引用行）。四档依次降级：
+
+1. **工作区文件 + 行号**（右侧文档预览 / 交付物审查的 `data-*` 锚点）→ `— 来源：src/app/main.ts:41`（无行号时 `— 来源：src/app/main.ts`）。
+2. **会话正文**→ `— 来源：会话《<标题>》 · 第 <N> 条消息（助手） · 代码块 <lang>`：标题取会话目录快照的 `displayTitle`，序数取锚点最近的 `[data-chat-node-key]` 在 `[data-chat-flow]` 里的 1-based 序号，角色只在 `data-chat-flow-kind` 明确为 `user`/`assistant` 时才写，语言只在 `pre code[class*=language-]` / `[data-language]` / `[data-lang]` 存在时才写；每一项取不到就省掉这项，全都取不到就不出这一行。
+3. **输入框内选区** → `— 来源：输入框草稿`（输入框选区被右键菜单有意跳过，这一档走 `Ctrl+Shift+K`）。
+4. **其它**（无锚点）→ 不输出来源行，绝不写「页面 · div」「会话消息区」这类空话。
 
 ### 1.3 添加到对话（与第二版相同）
 
@@ -39,7 +44,8 @@
 - **没有绑定会话时**：显示引用快照 + 预填引用块的 textarea + 「提问」（`Ctrl/Cmd+Enter` 同效）。
 - **点「提问」之后**：
   1. **建会话但不切主区**：`ctx.get("uiWorkspace").connectBlank(workspaceId)`。该方法的 `reuse` 缺省分支直接 `return this.sessions.create({ workspaceId })`，**不经过 `replaceMain`**（证据 4.1 第 1、2 条）。
-  2. **把引用写进新会话草稿，带重试**：轮询 `ctx.get("sessions").binding(sessionId)` 直到可用，然后 `ctx.get("conversation").input.requestDraftInitialization(binding, { prompt })`，返回 `blocked` 就 100ms 后再试，最多 20 次；`applied` / `preserved` / `blocked` / `unavailable` 分别对应不同状态文案（不会再无条件说「已准备好」）。
+2. **先绑 tab、再灌草稿**（时序关键）：建会话后立刻 `openResourceIn` 把 tab 指到该会话，**让宿主先把内嵌对话（含 composer）挂载起来**；草稿灌注在 tab 组件的 `useEffect` 里、等 `useResource` 拿到 reference 之后才开始 —— 轮询 `sessions.binding(sessionId)`，再 `conversation.input.requestDraftInitialization(binding, { prompt })`，`blocked` 就 100ms 重试，最多 20 次。反过来的顺序（先灌草稿后挂载）必然 `blocked`：没有挂载的 composer，`phase` 永远停在 `adjudicating`。
+2b. **绑不上就退化，绝不静默**：若 1.5s 内 tab 仍未绑定（`openResourceIn` 已知可能 no-op），`console.warn` 带上 sessionId，并把该会话在主区打开（`uiWorkspace.openSession`）后再灌草稿；状态行先显示「右栏没能打开该会话」再显示最终灌注结果。
   3. **把 tab 指向该会话的资源地址** `dsh-resource://selaskchat/session/<id>`：`controller.openResourceIn(sessionId, address, {})`（或 `openResource(address)`），由本插件注册的资源 provider `sessions.retain(sessionId, { source, signal })` 保住会话，tab 关闭时 `release()`。
   4. **tab 里渲染会话本体**：`SessionProvider({ session: reference })` 包住子槽，再在子槽里 `renderFactorySlot("conversation.content", { variant: "embedded", phase, hero }, {})` —— 宿主自己的对话渲染（含输入框）。
 - **发送**：在那个输入框里按回车（宿主自己的提交路径）。「提问」按钮**只准备草稿，不代发**；错误路径（建会话失败）才退回「写当前草稿 + toast」。
@@ -62,15 +68,15 @@
 dsh-selask/
 ├── package.json          43 行   dsh.bundle.patch + dsh.client.platform/inject
 ├── cordis.patch.yml        3 行   profile 层注册（- insert: dsh-selask）
-├── README.md             168 行 本文
+├── README.md             174 行 本文
 ├── lib/
 │   ├── index.js          5 行   宿主标记（export apply()）
-│   └── client.js       1088 行   全部浏览器逻辑
+│   └── client.js       1175 行   全部浏览器逻辑
 ├── locale/
-│   ├── zh.json           36 行
-│   └── en.json           36 行
+│   ├── zh.json           37 行
+│   └── en.json           37 行
 └── test/
-    └── smoke.mjs       542 行   无头桩测试（files 未包含）
+    └── smoke.mjs       706 行   无头桩测试（files 未包含）
 ```
 
 ---
@@ -162,6 +168,13 @@ smoke 覆盖：① 菜单两项 + `preventDefault` 恰好 1 次；② 「添加�
 插件页 → `dsh-selask` → 禁用 → 刷新；或卸载后删除 `D:\BBG\deepseek\dsh-selask`。插件不写任何持久化状态；侧边聊天的会话是宿主自己的会话，禁用插件不会删它。
 
 ---
+
+## 已知问题
+
+- 草稿灌注走宿主内部的 `requestDraftInitialization`：新会话刚创建时会短暂处于「忙碌」状态，插件会按 100ms 间隔重试最多 20 次。若 2 秒内始终被拒，状态行会如实写出「一直忙」。
+- 若右侧栏没能在 1.5 秒内绑定到新会话（宿主的右栏 store 未就绪），插件会**退化为在主区打开该会话并写入草稿**，控制台留下 `[dsh-selask] the right panel did not bind the side session …`。此时主区会切换。
+- 代码块语言标注依赖宿主在 `<pre><code>` 上标注语言；当前 DSH 版本不提供该标记，因此「代码块 xx」通常不会出现。
+- 退化路径下，状态行可能先显示失败原因、再被最终结果覆盖，文案以最终行为准。
 
 ## 8. 自查声明
 
