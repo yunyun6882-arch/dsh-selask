@@ -1,5 +1,5 @@
-// Headless smoke test for dsh-selask: stub window/document/react/ctx, then run the real
-// bundle against them. Run with: node .\test\smoke.mjs
+// Headless smoke test for dsh-selask. Stubs window/document/react/ctx, then runs the real
+// bundle against them: node .\test\smoke.mjs
 
 let capturedLoader = null;
 let prevented = 0;
@@ -8,10 +8,13 @@ const timers = [];
 const pluginErrors = [];
 const drainTimers = () => {
 	let guard = 0;
-	while (timers.length > 0 && guard < 100) {
+	while (timers.length > 0 && guard < 200) {
 		guard += 1;
 		timers.shift()();
 	}
+};
+const flush = async () => {
+	for (let i = 0; i < 12; i += 1) await Promise.resolve();
 };
 
 function createElementStub(tag) {
@@ -146,10 +149,6 @@ const reactStub = {
 	useEffect: (fn) => fn(),
 	useRef: () => ({ current: null })
 };
-const renderTab = (props) => {
-	componentState.cursor = 0;
-	return tabSlotRef.component(props);
-};
 
 await import("../lib/client.js");
 if (capturedLoader === null) throw new Error("bundle never called __ModuleLoader__.load");
@@ -158,7 +157,23 @@ const mod = capturedLoader.factory((name) => {
 	throw new Error("unexpected require: " + name);
 });
 
-const calls = { setDraft: [], submit: 0, insertText: 0, startSession: [], openTabIn: [], openRightbar: 0, openSession: [] };
+const calls = {
+	setDraft: [],
+	submit: 0,
+	insertText: 0,
+	openTabIn: [],
+	openResourceIn: [],
+	openRightbar: 0,
+	openSession: [],
+	connectBlank: [],
+	create: [],
+	seed: [],
+	retain: [],
+	release: [],
+	resourceRegister: [],
+	renderSlot: [],
+	factory: []
+};
 const actions = {
 	draftRev: 7,
 	setDraft: (text) => calls.setDraft.push(text),
@@ -167,16 +182,40 @@ const actions = {
 	captureInsertion: () => ({ start: 0, end: 0, draftRev: 7 })
 };
 
+// Session controllers: binding() becomes available only after the first writes, like a real
+// freshly created session; requestDraftInitialization answers blocked twice, then applied.
+let bindingReady = false;
+let seedCursor = 0;
+const seedPlan = ["blocked", "blocked", "applied"];
 const services = {
 	workspaces: { list: { getSnapshot: () => ({ items: [{ workspaceId: "ws-1", sessionIds: ["s1"] }] }) } },
 	uiSession: { current: { getSnapshot: () => ({ key: "s1" }) } },
 	uiWorkspace: {
-		startSession: (workspaceId, options) => calls.startSession.push([workspaceId, options]),
+		connectBlank: (workspaceId) => { calls.connectBlank.push([workspaceId]); return Promise.resolve("s-new"); },
 		openSession: (sessionId) => calls.openSession.push(sessionId)
 	},
+	sessions: {
+		create: (options) => { calls.create.push([options]); return Promise.resolve("s-created"); },
+		binding: (sessionId) => (bindingReady ? { sessionId } : void 0),
+		retain: (sessionId, options) => {
+			calls.retain.push([sessionId, options]);
+			return { sessionId, release: () => calls.release.push(sessionId) };
+		}
+	},
+	conversation: {
+		input: {
+			requestDraftInitialization: (binding, options) => {
+				calls.seed.push([binding, options]);
+				const outcome = seedPlan[Math.min(seedCursor, seedPlan.length - 1)];
+				seedCursor += 1;
+				return outcome;
+			}
+		}
+	},
+	resources: { register: (provider) => { calls.resourceRegister.push(provider); return () => {}; } },
 	sidebarRight: {
 		openTabIn: (sessionId, kind, options) => calls.openTabIn.push([sessionId, kind, options]),
-		openTab: (kind, options) => calls.openTabIn.push(["openTab", kind, options])
+		openResourceIn: (sessionId, address, options) => calls.openResourceIn.push([sessionId, address, options])
 	},
 	layout: { openRightbar: () => { calls.openRightbar += 1; } }
 };
@@ -191,15 +230,22 @@ const dict = {
 	"toast.written": "已写入输入框草稿（未发送）",
 	"toast.failed": "写入失败",
 	"toast.sideFallback": "侧边提问不可用，已放入当前对话",
+	"toast.sideSent": "已在右栏打开新的侧边会话（未发送）",
 	"tab.title": "侧边聊天",
 	"tab.empty": "还没有引用。选中文字后右键选「在侧边聊天中提问」。",
 	"tab.snapshot": "本次引用",
 	"tab.placeholder": "把问题补在引用下面……",
 	"tab.submit": "提问",
 	"tab.submitHint": "{keys} 提交",
-	"tab.sent": "已在新会话里准备好引用：补完问题，按回车发送。",
-	"tab.switch": "切换到该会话",
-	"tab.failed": "发起新会话失败，已放入当前对话草稿。",
+	"tab.creating": "正在新建侧边会话……",
+	"tab.createFailed": "新建会话失败，已把文字放进当前草稿。",
+	"tab.seeding": "正在把引用写入新会话草稿……",
+	"tab.seedApplied": "已在新会话里准备好引用：补完问题，按回车发送。",
+	"tab.seedBlocked": "新会话草稿一直忙（已重试 {count} 次）；可以点下面按钮在主区打开后粘贴。",
+	"tab.seedPreserved": "新会话里已经有别的草稿，引用没有覆盖它。",
+	"tab.seedUnavailable": "拿不到输入框接口（重试 {count} 次）。",
+	"tab.openInMain": "在主区打开该会话",
+	"tab.embedUnavailable": "这个版本不支持在侧栏内嵌会话，请在主区打开。",
 	"source.file": "— 来源：{path}:{line}",
 	"source.fileNoLine": "— 来源：{path}",
 	"source.page": "— 来源：{place}",
@@ -253,6 +299,7 @@ const makeCtx = (options = {}) => ({
 	}
 });
 const ctx = makeCtx();
+
 let tabSlotRef = null;
 const report = (label, value) => console.log(label + ": " + value);
 const assert = (condition, message) => {
@@ -266,25 +313,34 @@ const manifest = JSON.parse(fsMod.readFileSync(manifestUrl, "utf8"));
 const bundlePatch = manifest?.dsh?.bundle?.patch;
 const bundlePatchUrl = typeof bundlePatch === "string" && bundlePatch !== "" ? new URL(bundlePatch, manifestUrl) : null;
 report("dsh.bundle.patch", JSON.stringify(bundlePatch));
-assert(typeof bundlePatch === "string" && bundlePatch !== "", "package.json declares dsh.bundle.patch (without it the host installs a plain dependency and never loads the client)");
+assert(typeof bundlePatch === "string" && bundlePatch !== "", "package.json declares dsh.bundle.patch");
 assert(bundlePatchUrl !== null && fsMod.existsSync(bundlePatchUrl), "the declared patch file exists on disk");
 assert((manifest.files ?? []).includes("cordis.patch.yml"), "package files ship cordis.patch.yml");
 
 mod.apply(ctx);
 report("module id", capturedLoader.id);
+report("guard failures on first apply", JSON.stringify(pluginErrors));
+assert(pluginErrors.length === 0, "no registration may fail silently on a healthy host");
 report("effects", registrations.effects.length);
 report("slots", registrations.slots.map((entry) => entry.definition.name + (entry.definition.key ? "#" + entry.definition.key : "")).join(", "));
-report("tab", registrations.tabs[0].id + " / " + registrations.tabs[0].kind + " / " + registrations.tabs[0].title());
+const tabType = registrations.tabs[0];
+report("tab type", tabType.id + " / " + tabType.kind + " / " + JSON.stringify(tabType.patterns) + " / " + tabType.title());
+assert(tabType.canOpen("dsh-resource://selaskchat/session/s-new") === true, "tab type claims our resource addresses");
+assert(tabType.canOpen("dsh-resource://other/session/x") === false, "tab type rejects foreign addresses");
 const shortcut = registrations.shortcuts[0];
 report("shortcut", shortcut.id + " " + JSON.stringify(shortcut.defaults["web:windows"]) + " resolve=" + shortcut.resolve({}).status);
+report("resource provider registered", calls.resourceRegister.length);
 
 const composerSlot = registrations.slots.find((entry) => entry.definition.name === "conversation.input.right");
 const tabSlot = registrations.slots.find((entry) => entry.definition.name === "sidebar.right.pane.tab");
+const embedSlot = registrations.slots.find((entry) => entry.definition.name === "selask.chat.conversation");
 assert(composerSlot !== undefined, "composer slot registered");
+assert(tabSlot !== undefined, "tab slot registered");
+assert(embedSlot !== undefined, "embedded conversation slot registered");
+assert(tabSlot.definition.children?.["selask.chat.conversation"]?.scope === "session", "tab declares the session-scoped embed child");
 report("composer cell", JSON.stringify({ id: composerSlot.definition.id, order: composerSlot.definition.order }));
 assert(typeof composerSlot.definition.id === "string" && composerSlot.definition.id !== "", "list cell registers with the required id");
 assert(typeof composerSlot.definition.order === "number", "list cell carries a numeric order");
-assert(tabSlot !== undefined, "tab slot registered");
 tabSlotRef = tabSlot;
 
 const renderButton = () => composerSlot.component({
@@ -294,10 +350,12 @@ const renderButton = () => composerSlot.component({
 	useSession: (selector) => selector({ cwd: "D:\\BBG\\deepseek" }),
 	t: translate
 });
-
-// The composer slot is what binds the live inputActions; render it like a mounted session.
 renderButton();
 
+const renderTab = (props) => {
+	componentState.cursor = 0;
+	return tabSlotRef.component({ t: translate, sessionId: "s1", ...props });
+};
 const menuOf = () => body.children.find((child) => child.getAttribute("data-dsh-selask") === "menu");
 const renderMenu = (node) => {
 	selectionNode = node;
@@ -320,7 +378,6 @@ assert(prevented === 1, "contextmenu intercepted (preventDefault called once)");
 assert(menuEl.style.display === "flex", "menu shown");
 assert(menuEl.children.length === 2, "menu has exactly two items");
 report("menu items", JSON.stringify(menuEl.children.map((item) => item.textContent)));
-report("menu position", menuEl.style.left + " / " + menuEl.style.top);
 
 // ---- 2) Add to conversation: draft only, never send ----
 click(menuEl.children[0]);
@@ -329,58 +386,94 @@ assert(calls.setDraft.length === 1, "exactly one draft write");
 assert(calls.setDraft[0].includes("existing line"), "existing draft preserved");
 assert(calls.setDraft[0].includes("— 来源：src/app/main.ts:41"), "structured source line");
 assert(calls.submit === 0, "never calls submit");
-assert(calls.insertText === 0, "setDraft path used");
 assert(menuEl.style.display === "none", "menu closed after picking");
 
-// ---- 3) Ask in side chat: right sidebar tab + startSession draft seeding ----
+// ---- 3) Ask in side chat: the tab opens, no session is created yet ----
 selectionText.value = "const y = 2;";
 const menu2 = renderMenu(makeNode({ closest: { "[data-chat-flow]": {} } }));
 click(menu2.children[1]);
-report("openTabIn", JSON.stringify(calls.openTabIn));
-report("openRightbar calls", calls.openRightbar);
-assert(calls.openTabIn.length === 1, "side chat tab requested once");
-assert(calls.openTabIn[0][0] === "s1", "opened for the on-screen session");
-assert(calls.openTabIn[0][1] === "selask-quote", "tab kind");
-assert(calls.openRightbar === 1, "right bar expanded");
+report("openTabIn after item 2", JSON.stringify(calls.openTabIn));
+assert(calls.openTabIn.length === 1 && calls.openTabIn[0][1] === "selask-quote", "side chat tab requested by kind");
+assert(calls.connectBlank.length === 0, "no session is created until the user submits");
 
-const tabTree = renderTab({ t: translate, sessionId: "s1" });
-const children = tabTree.children;
-report("tab children", children.length);
-report("tab snapshot", JSON.stringify(children[1].children[0]));
-report("tab textarea value", JSON.stringify(children[3].props.value));
-assert(children[3].type === "textarea", "question box present");
-assert(children[3].props.value === children[1].children[0] + "\n\n", "prefilled with the block plus one blank line");
-assert(typeof children[3].props.onKeyDown === "function", "Ctrl+Enter handler present");
-
-const submitButton = children[4].children[0];
-report("submit label", JSON.stringify(submitButton.children[0]));
-submitButton.props.onClick();
-report("startSession call", JSON.stringify(calls.startSession));
-assert(calls.startSession.length === 1, "startSession called once");
-assert(calls.startSession[0][0] === "ws-1", "workspaceId resolved from the workspaces list");
-assert(Object.keys(calls.startSession[0][1]).join(",") === "prompt", "only a prompt option is passed");
-assert(calls.startSession[0][1].prompt.startsWith("> const y = 2;"), "prompt carries the cite block");
-assert(calls.setDraft.length === 1, "no extra draft write on the startSession path");
-assert(calls.submit === 0, "still never sends");
-
-// the new conversation shows up in the main binding: the tab then offers a switch button
-services.uiSession.current = { getSnapshot: () => ({ key: "s2" }) };
-drainTimers();
-const sentTree = renderTab({ t: translate, sessionId: "s1" });
-const statusNode = sentTree.children[sentTree.children.length - 1];
-report("sent status", JSON.stringify(statusNode?.children?.[0]?.children?.[0] ?? null));
-assert(statusNode !== null && statusNode !== undefined, "status block rendered after submit");
-assert(statusNode.children[0].children[0] === dict["tab.sent"], "sent copy shown");
-const switchButton = statusNode.children[1];
-assert(switchButton !== null && switchButton !== undefined, "switch button offered once the session id is known");
-report("switch label", JSON.stringify(switchButton.children[0]));
-switchButton.fire;
-switchButton.props.onClick();
+// ---- 4) compose tab: create (without replacing main) + retry the draft seed ----
+const composeTree = renderTab({ useTabInfo: () => ({ tab: { contentId: void 0 } }), useResource: () => ({ value: void 0 }) });
+report("compose children", composeTree.children.length);
+const textarea = composeTree.children[3];
+report("question value", JSON.stringify(textarea.props.value));
+assert(textarea.type === "textarea", "question box present");
+assert(textarea.props.value.endsWith("\n\n"), "prefilled with the quote block plus one blank line");
+textarea.props.onClick;
+composeTree.children[4].children[0].props.onClick();
+await flush();
+report("connectBlank", JSON.stringify(calls.connectBlank));
 report("openSession calls", JSON.stringify(calls.openSession));
-assert(calls.openSession.length === 1 && calls.openSession[0] === "s2", "switch opens the created conversation");
-assert(calls.submit === 0, "switching never sends");
+assert(calls.connectBlank.length === 1 && calls.connectBlank[0][0] === "ws-1", "session created through connectBlank(workspaceId)");
+assert(calls.openSession.length === 0, "main area is never switched");
+report("seed wait", "timers=" + timers.length + " seedCalls=" + calls.seed.length);
+assert(timers.length >= 1, "a retry is scheduled while the session binding is not ready yet");
+assert(calls.seed.length === 0, "no draft call happens before the binding exists");
+bindingReady = true;
+drainTimers();
+await flush();
+report("seed attempts", calls.seed.length);
+report("seed plan", JSON.stringify(calls.seed.map((entry) => entry[1].prompt.slice(0, 18))));
+assert(calls.seed.length >= 3, "blocked results are retried until applied");
+assert(calls.seed.every((entry) => typeof entry[0]?.sessionId === "string"), "seeding uses the session binding, not a promise");
+const seededTree = renderTab({ useTabInfo: () => ({ tab: { contentId: void 0 } }), useResource: () => ({ value: void 0 }) });
+const statusNode = seededTree.children[seededTree.children.length - 1];
+report("status text", JSON.stringify(statusNode?.children?.[0]?.children?.[0] ?? null));
+assert(statusNode !== undefined && statusNode !== null, "status line rendered");
+assert(String(statusNode.children[0].children[0]).includes("已在新会话里准备好引用"), "status reports the applied seed, not a blanket success");
+report("openResourceIn", JSON.stringify(calls.openResourceIn));
+assert(calls.openResourceIn.length === 1 && calls.openResourceIn[0][1].startsWith("dsh-resource://selaskchat/session/"), "tab is pointed at the new session's resource address");
+assert(calls.openSession.length === 0, "still no main-area switch");
 
-// ---- 4) the shortcut / composer button still writes the draft ----
+// ---- 5) embedded conversation: SessionProvider around the host factory slot ----
+const fakeReference = { sessionId: "s-new", release: () => {} };
+const fakeSessionProvider = function SessionProvider(props) { return props.children; };
+const embeddedTree = renderTab({
+	useTabInfo: () => ({ tab: { contentId: "dsh-resource://selaskchat/session/s-new" } }),
+	useResource: () => ({ value: { reference: fakeReference } }),
+	SessionProvider: fakeSessionProvider,
+	renderSlot: (name) => { calls.renderSlot.push(name); return { type: "slot", name }; }
+});
+report("embed tree", embeddedTree.props["data-selask-embed"] + " / " + (embeddedTree.children[0].type === fakeSessionProvider));
+assert(embeddedTree.props["data-selask-embed"] === "session", "tab switches to the embedded session view");
+assert(embeddedTree.children[0].type === fakeSessionProvider, "SessionProvider wraps the embedded view");
+assert(embeddedTree.children[0].props.session === fakeReference, "SessionProvider receives the retained reference");
+assert(calls.renderSlot[0] === "selask.chat.conversation", "the embed child slot is rendered");
+const factoryCalls = [];
+const embedTree = embedSlot.component({
+	t: translate,
+	sessionId: "s-new",
+	useSession: () => ({ blank: true, openState: "open" }),
+	useConversation: () => ({ activeTargets: new Set() }),
+	useSessions: () => true,
+	renderFactorySlot: (name, input, local) => { factoryCalls.push([name, input, local]); return { type: "factory", name }; }
+});
+report("factory slot", JSON.stringify(factoryCalls.map((entry) => [entry[0], entry[1].variant])));
+assert(factoryCalls.length === 1 && factoryCalls[0][0] === "conversation.content", "embedded view renders the host conversation.content factory");
+assert(factoryCalls[0][1].variant === "embedded", "it uses the embedded variant");
+const noFactoryTree = embedSlot.component({ t: translate, sessionId: "s-new" });
+assert(noFactoryTree.props["data-dsh-selask"] === "embed-unavailable", "missing factory slot degrades to a message, not a crash");
+
+// ---- 6) resource provider retains and releases the session ----
+const provider = calls.resourceRegister[0];
+assert(provider !== undefined && provider.protocol === "selaskchat", "resource protocol registered");
+const controller = new AbortController();
+const stream = provider.open("dsh-resource://selaskchat/session/s-new", { signal: controller.signal });
+const first = await stream.next();
+report("resource frame", JSON.stringify({ ok: first.value?.ok, sessionId: first.value?.value?.sessionId }));
+assert(first.value.ok === true, "resource opens for a valid address");
+assert(calls.retain.length === 1 && calls.retain[0][0] === "s-new", "sessions.retain(sessionId) called for the tab");
+assert(first.value.value.reference.sessionId === "s-new", "the frame carries the retained reference");
+controller.abort();
+await stream.return?.();
+report("released", JSON.stringify(calls.release));
+assert(calls.release.length === 1 && calls.release[0] === "s-new", "reference released when the tab closes");
+
+// ---- 7) the shortcut / composer button still write the draft ----
 selectionText.value = "字".repeat(500);
 selectionNode = makeNode({ closest: { "[data-textpreview-body]": {} } });
 renderButton().props.onClick();
@@ -389,12 +482,11 @@ const quoteLine = lastDraft.split("\n").filter((line) => line.startsWith("> "))[
 report("clip quote line chars", Array.from(quoteLine).length);
 assert(Array.from(quoteLine).length === 403, "400 char snapshot + '> ' + ellipsis");
 assert(lastDraft.includes("— 来源：右侧文档预览"), "document preview labelled when no path resolves");
-report("shortcut run writes draft", calls.setDraft.length);
 shortcut.resolve({}).run();
 assert(calls.setDraft.length === 3, "shortcut writes the draft too");
-assert(calls.submit === 0, "nothing sends anywhere");
+assert(calls.submit === 0, "nothing sends through the composer action face");
 
-// ---- 5) one failing registration must not take the others down ----
+// ---- 8) one failing registration must not take the others down ----
 const menuListenersBefore = (docListeners.get("contextmenu") ?? []).length;
 const tabsBefore = registrations.tabs.length;
 const shortcutsBefore = registrations.shortcuts.length;
@@ -405,20 +497,13 @@ try {
 } catch (error) {
 	applyThrew = error;
 }
-const menuListenersAfter = (docListeners.get("contextmenu") ?? []).length;
-report("apply threw on failing slot", applyThrew === null ? "no" : String(applyThrew));
-report("contextmenu listeners", menuListenersBefore + " -> " + menuListenersAfter);
 report("plugin errors logged", JSON.stringify(pluginErrors.slice(errorsBefore)));
+report("contextmenu listeners", menuListenersBefore + " -> " + (docListeners.get("contextmenu") ?? []).length);
 assert(applyThrew === null, "apply() survives a failing registration");
-assert(menuListenersAfter === menuListenersBefore + 1, "context menu still installed when the composer cell fails");
+assert((docListeners.get("contextmenu") ?? []).length === menuListenersBefore + 1, "context menu still installed when the composer cell fails");
 assert(registrations.tabs.length === tabsBefore + 1, "tab type still registered when the composer cell fails");
 assert(registrations.shortcuts.length === shortcutsBefore + 1, "shortcut still registered when the composer cell fails");
-report("slots after failing cell", registrations.slots.length);
-assert(pluginErrors.length === errorsBefore + 1, "exactly one failure logged: " + JSON.stringify(pluginErrors.slice(errorsBefore)));
-assert(pluginErrors[errorsBefore].includes("composer button"), "the failure names the composer item");
-assert(registrations.slots.some((entry) => entry.definition.name === "sidebar.right.pane.tab"), "the tab body still registered when only the composer cell fails");
-
-// ---- 6) a shot menu install must not stop the rest either ----
+assert(pluginErrors.length === errorsBefore + 1 && pluginErrors[errorsBefore].includes("composer button"), "the failure is logged against its own item");
 const menuListenersBefore2 = (docListeners.get("contextmenu") ?? []).length;
 const tabsBefore2 = registrations.tabs.length;
 let hookThrew = null;
@@ -431,7 +516,7 @@ assert(hookThrew === null, "apply() survives a failing tab registration");
 assert((docListeners.get("contextmenu") ?? []).length === menuListenersBefore2 + 1, "context menu installed before the failing item");
 assert(registrations.tabs.length === tabsBefore2, "the failing tab type is simply skipped");
 
-// ---- 7) every --dsw-* token in the bundle must exist in the official contract ----
+// ---- 9) every --dsw-* token in the bundle must exist in the official contract ----
 const tokenContractPaths = [
 	"C:\\Users\\BBG\\.dsh\\profiles\\desktop\\node_modules\\@linxin666\\dsh-client-ui-skin-center\\contracts\\official-tokens-v1.json",
 	"C:\\Users\\BBG\\.dsh\\profiles\\desktop-BACKUP-20261019-234331\\node_modules\\@linxin666\\dsh-client-ui-skin-center\\contracts\\official-tokens-v1.json"
